@@ -28,7 +28,19 @@ Return exactly this JSON structure:
     "breakdown": "<1 sentence explaining why this specific score was assigned>"
   },
   "language": "English" | "Tamil" | "Hindi" | "Mixed" | "Unknown",
-  "pattern": "Known Scam Template" | "Unique Pattern" | "Partial Match"
+  "pattern": "Known Scam Template" | "Unique Pattern" | "Partial Match",
+  "tags": ["<applicable tags from: Urgency, Financial Lure, Suspicious Link, Fear, Reward, Impersonation>"],
+  "urls": [
+    {
+      "url": "<exact url extracted from the message>",
+      "verdict": "Suspicious Domain" | "Not Official Domain" | "Safe"
+    }
+  ],
+  "patterns": {
+    "urgency": <true if message uses urgency tactics, false otherwise>,
+    "fear": <true if message uses fear tactics, false otherwise>,
+    "reward": <true if message promises rewards or prizes, false otherwise>
+  }
 }
 
 Scoring rules:
@@ -45,14 +57,37 @@ Critical rules:
 - severity.breakdown must be a single sentence explaining the score, referencing the message content
 - language must detect the actual language of the input message
 - pattern: use "Known Scam Template" if it closely matches common scam formats, "Partial Match" if it shares some traits, "Unique Pattern" if it does not match known templates
+- tags: detect ALL matching psychological/manipulation tags present in the message; return empty array if none apply
+- urls: extract ALL URLs present in the message and assess whether each domain appears official or suspicious; return empty array if no URLs found
+- urls.verdict: "Suspicious Domain" if the domain looks fake/malicious (e.g. bit.ly, random strings, misspelled brands), "Not Official Domain" if it's a real but non-official domain, "Safe" if it appears to be a legitimate official domain
+- patterns.urgency: true if the message contains time pressure, deadlines, or urgent calls to action
+- patterns.fear: true if the message threatens negative consequences, account suspension, legal action, etc.
+- patterns.reward: true if the message offers prizes, money, gifts, or exclusive deals
 - return ONLY the JSON object, nothing else`;
 }
 
 // ─── Parse AI response ────────────────────────────────────────────────────────
 
 function parseJSON(raw: string) {
+  // Strip markdown fences the model sometimes adds despite instructions
   const cleaned = raw.replace(/```json|```/g, "").trim();
-  return JSON.parse(cleaned);
+  console.log("[analyze] raw AI response:", cleaned.slice(0, 300));
+  const parsed = JSON.parse(cleaned); // throws on invalid JSON
+  return parsed;
+}
+
+// Ensure the parsed object has the required dynamic fields
+function validateParsed(obj: Record<string, unknown>) {
+  const required = [
+    "risk", "score", "type", "reason", "triggers", "advice",
+    "confidence", "rewrite", "severity", "language", "pattern",
+    "tags", "urls", "patterns",
+  ];
+  for (const key of required) {
+    if (!(key in obj)) throw new Error(`AI response missing field: ${key}`);
+  }
+  if (typeof obj.score !== "number") throw new Error("score must be a number");
+  return obj;
 }
 
 // ─── Smart keyword fallback ───────────────────────────────────────────────────
@@ -60,14 +95,34 @@ function parseJSON(raw: string) {
 const SCAM_KEYWORDS = ["win", "won", "lottery", "click", "urgent", "prize", "claim", "free money", "otp", "verify now"];
 const SUSPICIOUS_KEYWORDS = ["offer", "deal", "limited", "exclusive", "act now", "bank", "account", "password"];
 
+function extractUrls(message: string): { url: string; verdict: "Suspicious Domain" | "Not Official Domain" | "Safe" }[] {
+  const urlRegex = /https?:\/\/[^\s]+|www\.[^\s]+/gi;
+  const matches = message.match(urlRegex) || [];
+  return matches.map((url) => {
+    const lower = url.toLowerCase();
+    const suspicious =
+      lower.includes("bit.ly") ||
+      lower.includes(".ru") ||
+      lower.includes(".tk") ||
+      lower.includes(".xyz") ||
+      lower.includes(".top") ||
+      /[a-z]{2,}-[a-z]{2,}-[a-z]{2,}/.test(lower) ||
+      /secure-|login-|verify-|account-/.test(lower);
+    return { url, verdict: suspicious ? "Suspicious Domain" : "Not Official Domain" };
+  });
+}
+
 function smartMockResponse(message: string) {
   const lower = message.toLowerCase();
 
   const isScam = SCAM_KEYWORDS.some((kw) => lower.includes(kw));
   const isSuspicious = !isScam && SUSPICIOUS_KEYWORDS.some((kw) => lower.includes(kw));
+  const urls = extractUrls(message);
 
   if (isScam) {
     const matchedTriggers = SCAM_KEYWORDS.filter((kw) => lower.includes(kw));
+    const hasUrgency = ["urgent", "claim", "verify now"].some((kw) => lower.includes(kw));
+    const hasReward = ["win", "won", "lottery", "prize", "free money"].some((kw) => lower.includes(kw));
     return {
       risk: "Scam",
       score: 85,
@@ -87,10 +142,22 @@ function smartMockResponse(message: string) {
       },
       language: "Unknown",
       pattern: "Known Scam Template",
+      tags: [
+        ...(hasUrgency ? ["Urgency"] : []),
+        ...(hasReward ? ["Reward", "Financial Lure"] : []),
+        ...(urls.length > 0 ? ["Suspicious Link"] : []),
+      ],
+      urls,
+      patterns: {
+        urgency: hasUrgency,
+        fear: false,
+        reward: hasReward,
+      },
     };
   }
 
   if (isSuspicious) {
+    const hasFear = ["account", "password", "bank"].some((kw) => lower.includes(kw));
     return {
       risk: "Suspicious",
       score: 55,
@@ -110,6 +177,16 @@ function smartMockResponse(message: string) {
       },
       language: "Unknown",
       pattern: "Partial Match",
+      tags: [
+        ...(hasFear ? ["Fear"] : []),
+        ...(urls.length > 0 ? ["Suspicious Link"] : []),
+      ],
+      urls,
+      patterns: {
+        urgency: lower.includes("act now") || lower.includes("limited"),
+        fear: hasFear,
+        reward: lower.includes("offer") || lower.includes("deal"),
+      },
     };
   }
 
@@ -132,6 +209,13 @@ function smartMockResponse(message: string) {
     },
     language: "Unknown",
     pattern: "Unique Pattern",
+    tags: [],
+    urls,
+    patterns: {
+      urgency: false,
+      fear: false,
+      reward: false,
+    },
   };
 }
 
@@ -144,7 +228,8 @@ async function tryGemini(message: string, persona: string) {
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
   const result = await model.generateContent(buildPrompt(message, persona));
-  return parseJSON(result.response.text());
+  const parsed = parseJSON(result.response.text());
+  return validateParsed(parsed);
 }
 
 // ─── OpenAI ───────────────────────────────────────────────────────────────────
@@ -165,7 +250,8 @@ async function tryOpenAI(message: string, persona: string) {
 
   if (!res.ok) throw new Error(`OpenAI error: ${res.status}`);
   const data = await res.json();
-  return parseJSON(data.choices[0].message.content);
+  const parsed = parseJSON(data.choices[0].message.content);
+  return validateParsed(parsed);
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────

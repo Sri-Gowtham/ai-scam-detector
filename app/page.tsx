@@ -10,6 +10,15 @@ type Confidence = "Low" | "Medium" | "High";
 
 type Persona = "General" | "Student" | "Elderly" | "Employee";
 
+type ScamTag = "Urgency" | "Financial Lure" | "Suspicious Link" | "Fear" | "Reward" | "Impersonation";
+
+type UrlVerdict = "Suspicious Domain" | "Not Official Domain" | "Safe";
+
+interface DetectedUrl {
+  url: string;
+  verdict: UrlVerdict;
+}
+
 interface AnalysisResult {
   risk: RiskLevel;
   score: number;
@@ -19,6 +28,12 @@ interface AnalysisResult {
   advice: string[];
   confidence: Confidence;
   rewrite: string;
+  severity?: { factors: string[]; breakdown: string };
+  language?: string;
+  pattern?: string;
+  tags?: ScamTag[];
+  urls?: DetectedUrl[];
+  patterns?: { urgency: boolean; fear: boolean; reward: boolean };
 }
 
 interface ScanHistoryItem {
@@ -61,6 +76,21 @@ const CONFIDENCE_STYLES: Record<Confidence, string> = {
   High: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
   Medium: "bg-amber-500/15 text-amber-400 border-amber-500/30",
   Low: "bg-white/10 text-white/50 border-white/20",
+};
+
+const TAG_STYLES: Record<ScamTag, string> = {
+  Urgency: "bg-rose-500/15 border-rose-500/30 text-rose-300",
+  Fear: "bg-rose-500/15 border-rose-500/30 text-rose-300",
+  "Financial Lure": "bg-yellow-500/15 border-yellow-500/30 text-yellow-300",
+  Reward: "bg-yellow-500/15 border-yellow-500/30 text-yellow-300",
+  "Suspicious Link": "bg-orange-500/15 border-orange-500/30 text-orange-300",
+  Impersonation: "bg-purple-500/15 border-purple-500/30 text-purple-300",
+};
+
+const URL_VERDICT_STYLES: Record<UrlVerdict, string> = {
+  "Suspicious Domain": "bg-rose-500/15 border-rose-500/30 text-rose-300",
+  "Not Official Domain": "bg-orange-500/15 border-orange-500/30 text-orange-300",
+  Safe: "bg-emerald-500/15 border-emerald-500/30 text-emerald-300",
 };
 
 const PERSONAS: Persona[] = ["General", "Student", "Elderly", "Employee"];
@@ -170,6 +200,9 @@ export default function Home() {
   };
 
   const cfg = result ? RISK_CONFIG[result.risk] ?? RISK_CONFIG["Suspicious"] : null;
+
+  const showActionButtons =
+    result && (result.risk === "Suspicious" || result.risk === "Scam");
 
   return (
     <div className="min-h-screen bg-[#0d0d0f] text-white">
@@ -295,7 +328,7 @@ export default function Home() {
         {result && cfg && (
           <div
             id="result-card"
-            className={`border rounded-2xl p-5 sm:p-6 mb-6 backdrop-blur-sm ${cfg.bg} ${cfg.border} transition-all`}
+            className={`border rounded-2xl p-5 sm:p-6 mb-4 backdrop-blur-sm ${cfg.bg} ${cfg.border} transition-all`}
           >
             {/* Risk badge + confidence + score */}
             <div className="flex items-center justify-between mb-4">
@@ -321,6 +354,20 @@ export default function Home() {
                 <p className="text-xs text-white/30">/ 100</p>
               </div>
             </div>
+
+            {/* ── EXPLAINABILITY TAGS ── */}
+            {result.tags && result.tags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                {result.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border ${TAG_STYLES[tag] ?? "bg-white/10 border-white/20 text-white/60"}`}
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {/* Scam type chip */}
             {result.type && (
@@ -356,6 +403,44 @@ export default function Home() {
               </div>
             </div>
 
+            {/* ── PATTERN INDICATORS ── */}
+            {result.patterns && (
+              <div className="flex items-center gap-4 mb-5 py-2.5 px-3 bg-white/[0.03] rounded-xl border border-white/8">
+                <div className="flex items-center gap-1.5 text-xs text-white/50">
+                  <span
+                    className={`w-2 h-2 rounded-full ${result.patterns.urgency ? "bg-rose-400" : "bg-white/20"}`}
+                  />
+                  {result.patterns.urgency ? (
+                    <span className="text-rose-300">Urgency Detected</span>
+                  ) : (
+                    <span>No Urgency</span>
+                  )}
+                </div>
+                <div className="w-px h-3.5 bg-white/10" />
+                <div className="flex items-center gap-1.5 text-xs text-white/50">
+                  <span
+                    className={`w-2 h-2 rounded-full ${result.patterns.fear ? "bg-rose-400" : "bg-white/20"}`}
+                  />
+                  {result.patterns.fear ? (
+                    <span className="text-rose-300">Fear Tactics</span>
+                  ) : (
+                    <span>No Fear</span>
+                  )}
+                </div>
+                <div className="w-px h-3.5 bg-white/10" />
+                <div className="flex items-center gap-1.5 text-xs text-white/50">
+                  <span
+                    className={`w-2 h-2 rounded-full ${result.patterns.reward ? "bg-amber-400" : "bg-white/20"}`}
+                  />
+                  {result.patterns.reward ? (
+                    <span className="text-amber-300">Reward Bait</span>
+                  ) : (
+                    <span>No Reward</span>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Reason */}
             <div className="mb-4">
               <p className="text-xs text-white/40 uppercase tracking-widest mb-1.5">Analysis</p>
@@ -374,6 +459,32 @@ export default function Home() {
                     >
                       {t}
                     </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── URL SAFETY CHECKER ── */}
+            {result.urls && result.urls.length > 0 && (
+              <div className="bg-white/[0.04] border border-white/10 rounded-xl p-4 mb-4">
+                <p className="text-xs text-white/40 uppercase tracking-widest mb-3 font-semibold">
+                  🔗 Links Detected
+                </p>
+                <div className="space-y-2">
+                  {result.urls.map((u, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center justify-between gap-3 bg-black/20 rounded-lg px-3 py-2"
+                    >
+                      <span className="text-xs text-white/60 truncate flex-1 font-mono">
+                        {u.url}
+                      </span>
+                      <span
+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap shrink-0 ${URL_VERDICT_STYLES[u.verdict]}`}
+                      >
+                        {u.verdict}
+                      </span>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -399,6 +510,39 @@ export default function Home() {
               <div className="bg-emerald-950/40 border border-emerald-500/20 rounded-xl p-4 mb-4">
                 <p className="text-xs text-emerald-400/80 uppercase tracking-widest mb-2 font-semibold">✉️ Safe Version</p>
                 <p className="text-sm text-white/80 leading-relaxed">{result.rewrite}</p>
+              </div>
+            )}
+
+            {/* ── ACTION BUTTONS ── */}
+            {showActionButtons && (
+              <div className="mb-4">
+                <p className="text-xs text-white/30 uppercase tracking-widest mb-2.5">Quick Actions</p>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    id="action-no-click"
+                    onClick={() => alert("Stay safe! Do not click any links in this message.")}
+                    className="flex flex-col items-center gap-1.5 py-2.5 px-2 rounded-xl border border-rose-500/40 text-rose-400 bg-rose-500/5 hover:bg-rose-500/15 transition-all text-[11px] font-semibold text-center"
+                  >
+                    <span className="text-base">🚫</span>
+                    <span>Do NOT Click Links</span>
+                  </button>
+                  <button
+                    id="action-report-scam"
+                    onClick={() => window.open("https://cybercrime.gov.in", "_blank")}
+                    className="flex flex-col items-center gap-1.5 py-2.5 px-2 rounded-xl border border-orange-500/40 text-orange-400 bg-orange-500/5 hover:bg-orange-500/15 transition-all text-[11px] font-semibold text-center"
+                  >
+                    <span className="text-base">🚨</span>
+                    <span>Report Scam</span>
+                  </button>
+                  <button
+                    id="action-block-sender"
+                    onClick={() => alert("Go to your phone settings → Block this number immediately.")}
+                    className="flex flex-col items-center gap-1.5 py-2.5 px-2 rounded-xl border border-white/20 text-white/50 bg-white/5 hover:bg-white/10 transition-all text-[11px] font-semibold text-center"
+                  >
+                    <span className="text-base">🚷</span>
+                    <span>Block Sender</span>
+                  </button>
+                </div>
               </div>
             )}
 
