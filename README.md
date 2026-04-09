@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🛡️ AI Scam Detector
 
-## Getting Started
+> Real-time AI-powered scam detection for SMS, WhatsApp, and Email messages — built at BuildWithAI INNOVATEX 4.0 Hackathon.
 
-First, run the development server:
+---
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## 🚨 Problem
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- Millions of scam messages are sent daily targeting students, elderly, and employees
+- Existing solutions are reactive — people realize too late
+- No real-time, intelligent, explainable scam detection tool exists for common users
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## ✅ Solution
 
-## Learn More
+AI Scam Detector analyzes any message instantly and tells you:
+- Is it Safe, Suspicious, or a Scam?
+- What type of scam is it?
+- What should you do right now?
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 🔥 Features
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- 🔍 **Real-time Text Analysis** — paste any SMS, WhatsApp, or email
+- 📸 **Screenshot Scanner** — upload image, AI extracts + analyzes text
+- 🎙️ **Voice Input** — speak your message, AI transcribes + detects
+- 📊 **Risk Score (0-100)** — dynamic calibrated scoring
+- 🏷️ **Scam Type Detection** — Phishing, Lottery, OTP Fraud, Job Scam
+- ⚡ **Explainability Tags** — Urgency, Fear, Financial Lure, Impersonation
+- 🔗 **URL Safety Checker** — flags suspicious domains
+- 🧑 **Persona Mode** — tailored advice for Student, Elderly, Employee
+- 🚨 **Panic Button** — immediate damage control if already clicked
+- 📋 **Copy + Download Report** — export full analysis
+- 🕐 **Scan History** — last 10 scans saved locally
+- 🤖 **Multi-AI Architecture** — Claude (primary) + Gemini (fallback)
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 🧠 Tech Stack
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 14, React, Tailwind CSS |
+| Backend | Next.js API Routes |
+| AI (Primary) | Anthropic Claude (claude-haiku) |
+| AI (Fallback) | Google Gemini 1.5 Flash |
+| OCR | Gemini Vision + HuggingFace |
+| Deployment | Vercel |
+
+---
+
+## 🏗️ Architecture
