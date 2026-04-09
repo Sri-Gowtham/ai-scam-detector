@@ -1,285 +1,164 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
-// ─── Prompt ───────────────────────────────────────────────────────────────────
-
-function buildPrompt(message: string, persona: string) {
-  const personaContext =
-    persona !== "General"
-      ? `\nThe recipient persona is: ${persona}. Tailor your advice to be especially relevant for a ${persona.toLowerCase()} audience.`
-      : "";
-
-  return `You are an expert scam detection AI. Analyze the following message and return ONLY raw JSON — no markdown, no backticks, no explanation.${personaContext}
-
-Message: "${message}"
-
-Return exactly this JSON structure:
-{
-  "risk": "Safe" | "Suspicious" | "Scam",
-  "score": <integer 0-100>,
-  "type": "Phishing" | "Lottery" | "OTP Fraud" | "Job Scam" | "Unknown",
-  "reason": "<1-2 sentence explanation specific to THIS message, not generic>",
-  "triggers": ["<exact phrase copied verbatim from the message that is suspicious>"],
-  "advice": ["<actionable step 1 specific to the detected scam type>", "<actionable step 2>", "<actionable step 3>"],
-  "confidence": "Low" | "Medium" | "High",
-  "rewrite": "<if the message is suspicious or a scam, rewrite it as a safe, legitimate version; if safe, return empty string>",
-  "severity": {
-    "factors": ["<factor 1 contributing to score>", "<factor 2>", "<factor 3>"],
-    "breakdown": "<1 sentence explaining why this specific score was assigned>"
-  },
-  "language": "English" | "Tamil" | "Hindi" | "Mixed" | "Unknown",
-  "pattern": "Known Scam Template" | "Unique Pattern" | "Partial Match",
-  "tags": ["<applicable tags from: Urgency, Financial Lure, Suspicious Link, Fear, Reward, Impersonation>"],
-  "urls": [
-    {
-      "url": "<exact url extracted from the message>",
-      "verdict": "Suspicious Domain" | "Not Official Domain" | "Safe"
-    }
-  ],
-  "patterns": {
-    "urgency": <true if message uses urgency tactics, false otherwise>,
-    "fear": <true if message uses fear tactics, false otherwise>,
-    "reward": <true if message promises rewards or prizes, false otherwise>
-  }
-}
-
-Scoring rules:
-- 0–30   → risk must be "Safe"
-- 31–69  → risk must be "Suspicious"
-- 70–100 → risk must be "Scam"
-
-Critical rules:
-- reason must reference specific content from the message, never be generic
-- triggers must contain EXACT phrases lifted verbatim from the input message (empty array if Safe)
-- advice must be tailored to the detected scam type AND the persona (e.g. Elderly advice is simpler and more cautious)
-- rewrite must be empty string "" when risk is "Safe"
-- severity.factors must list exactly 3 specific factors that influenced the score
-- severity.breakdown must be a single sentence explaining the score, referencing the message content
-- language must detect the actual language of the input message
-- pattern: use "Known Scam Template" if it closely matches common scam formats, "Partial Match" if it shares some traits, "Unique Pattern" if it does not match known templates
-- tags: detect ALL matching psychological/manipulation tags present in the message; return empty array if none apply
-- urls: extract ALL URLs present in the message and assess whether each domain appears official or suspicious; return empty array if no URLs found
-- urls.verdict: "Suspicious Domain" if the domain looks fake/malicious (e.g. bit.ly, random strings, misspelled brands), "Not Official Domain" if it's a real but non-official domain, "Safe" if it appears to be a legitimate official domain
-- patterns.urgency: true if the message contains time pressure, deadlines, or urgent calls to action
-- patterns.fear: true if the message threatens negative consequences, account suspension, legal action, etc.
-- patterns.reward: true if the message offers prizes, money, gifts, or exclusive deals
-- return ONLY the JSON object, nothing else`;
-}
-
-// ─── Parse AI response ────────────────────────────────────────────────────────
-
-function parseJSON(raw: string) {
-  // Strip markdown fences the model sometimes adds despite instructions
-  const cleaned = raw.replace(/```json|```/g, "").trim();
-  console.log("[analyze] raw AI response:", cleaned.slice(0, 300));
-  const parsed = JSON.parse(cleaned); // throws on invalid JSON
-  return parsed;
-}
-
-// Ensure the parsed object has the required dynamic fields
-function validateParsed(obj: Record<string, unknown>) {
-  const required = [
-    "risk", "score", "type", "reason", "triggers", "advice",
-    "confidence", "rewrite", "severity", "language", "pattern",
-    "tags", "urls", "patterns",
-  ];
-  for (const key of required) {
-    if (!(key in obj)) throw new Error(`AI response missing field: ${key}`);
-  }
-  if (typeof obj.score !== "number") throw new Error("score must be a number");
-  return obj;
-}
-
-// ─── Smart keyword fallback ───────────────────────────────────────────────────
-
-const SCAM_KEYWORDS = ["win", "won", "lottery", "click", "urgent", "prize", "claim", "free money", "otp", "verify now"];
-const SUSPICIOUS_KEYWORDS = ["offer", "deal", "limited", "exclusive", "act now", "bank", "account", "password"];
-
-function extractUrls(message: string): { url: string; verdict: "Suspicious Domain" | "Not Official Domain" | "Safe" }[] {
-  const urlRegex = /https?:\/\/[^\s]+|www\.[^\s]+/gi;
-  const matches = message.match(urlRegex) || [];
-  return matches.map((url) => {
-    const lower = url.toLowerCase();
-    const suspicious =
-      lower.includes("bit.ly") ||
-      lower.includes(".ru") ||
-      lower.includes(".tk") ||
-      lower.includes(".xyz") ||
-      lower.includes(".top") ||
-      /[a-z]{2,}-[a-z]{2,}-[a-z]{2,}/.test(lower) ||
-      /secure-|login-|verify-|account-/.test(lower);
-    return { url, verdict: suspicious ? "Suspicious Domain" : "Not Official Domain" };
-  });
-}
-
-function smartMockResponse(message: string) {
-  const lower = message.toLowerCase();
-
-  const isScam = SCAM_KEYWORDS.some((kw) => lower.includes(kw));
-  const isSuspicious = !isScam && SUSPICIOUS_KEYWORDS.some((kw) => lower.includes(kw));
-  const urls = extractUrls(message);
-
-  if (isScam) {
-    const matchedTriggers = SCAM_KEYWORDS.filter((kw) => lower.includes(kw));
-    const hasUrgency = ["urgent", "claim", "verify now"].some((kw) => lower.includes(kw));
-    const hasReward = ["win", "won", "lottery", "prize", "free money"].some((kw) => lower.includes(kw));
-    return {
-      risk: "Scam",
-      score: 85,
-      type: lower.includes("lottery") || lower.includes("win") ? "Lottery" : "Phishing",
-      reason: "The message contains high-risk keywords commonly associated with scam attempts.",
-      triggers: matchedTriggers,
-      advice: [
-        "Do not click any links in this message",
-        "Do not share personal or financial information",
-        "Report this message to your provider",
-      ],
-      confidence: "Medium",
-      rewrite: "",
-      severity: {
-        factors: ["Urgency language", "Prize/reward lure", "Request for action"],
-        breakdown: "High score assigned due to presence of known scam trigger words.",
-      },
-      language: "Unknown",
-      pattern: "Known Scam Template",
-      tags: [
-        ...(hasUrgency ? ["Urgency"] : []),
-        ...(hasReward ? ["Reward", "Financial Lure"] : []),
-        ...(urls.length > 0 ? ["Suspicious Link"] : []),
-      ],
-      urls,
-      patterns: {
-        urgency: hasUrgency,
-        fear: false,
-        reward: hasReward,
-      },
-    };
-  }
-
-  if (isSuspicious) {
-    const hasFear = ["account", "password", "bank"].some((kw) => lower.includes(kw));
-    return {
-      risk: "Suspicious",
-      score: 55,
-      type: "Unknown",
-      reason: "The message contains some terms that are commonly found in suspicious communications.",
-      triggers: SUSPICIOUS_KEYWORDS.filter((kw) => lower.includes(kw)),
-      advice: [
-        "Verify the sender's identity before responding",
-        "Do not share sensitive information",
-        "Contact the organization directly through official channels",
-      ],
-      confidence: "Low",
-      rewrite: "",
-      severity: {
-        factors: ["Unverified sender", "Potentially deceptive language", "Unusual request"],
-        breakdown: "Moderate score due to presence of terms common in suspicious messages.",
-      },
-      language: "Unknown",
-      pattern: "Partial Match",
-      tags: [
-        ...(hasFear ? ["Fear"] : []),
-        ...(urls.length > 0 ? ["Suspicious Link"] : []),
-      ],
-      urls,
-      patterns: {
-        urgency: lower.includes("act now") || lower.includes("limited"),
-        fear: hasFear,
-        reward: lower.includes("offer") || lower.includes("deal"),
-      },
-    };
-  }
-
-  return {
-    risk: "Safe",
-    score: 15,
-    type: "Unknown",
-    reason: "No suspicious patterns or high-risk keywords were detected in this message.",
-    triggers: [],
-    advice: [
-      "Continue practicing safe messaging habits",
-      "Stay alert for unexpected requests",
-      "When in doubt, verify sender identity",
-    ],
-    confidence: "Low",
-    rewrite: "",
-    severity: {
-      factors: ["No urgency language", "No suspicious links", "No reward lures"],
-      breakdown: "Low score assigned as no known scam indicators were found.",
-    },
-    language: "Unknown",
-    pattern: "Unique Pattern",
-    tags: [],
-    urls,
-    patterns: {
-      urgency: false,
-      fear: false,
-      reward: false,
-    },
-  };
-}
-
-// ─── Gemini ───────────────────────────────────────────────────────────────────
-
-async function tryGemini(message: string, persona: string) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("No Gemini key");
-
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-  const result = await model.generateContent(buildPrompt(message, persona));
-  const parsed = parseJSON(result.response.text());
-  return validateParsed(parsed);
-}
-
-// ─── OpenAI ───────────────────────────────────────────────────────────────────
-
-async function tryOpenAI(message: string, persona: string) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("No OpenAI key");
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: "gpt-3.5-turbo",
-      messages: [{ role: "user", content: buildPrompt(message, persona) }],
-      temperature: 0.2,
-    }),
-  });
-
-  if (!res.ok) throw new Error(`OpenAI error: ${res.status}`);
-  const data = await res.json();
-  const parsed = parseJSON(data.choices[0].message.content);
-  return validateParsed(parsed);
-}
-
-// ─── Route handler ────────────────────────────────────────────────────────────
+import { buildPrompt, smartMockResponse } from "@/lib/scam-logic";
 
 export async function POST(req: NextRequest) {
-  const { message, persona = "General" } = await req.json();
-
-  if (!message) {
-    return NextResponse.json({ error: "No message provided" }, { status: 400 });
-  }
-
-  // 1️⃣ Gemini (primary)
+  let message = "";
   try {
-    const result = await tryGemini(message, persona);
-    return NextResponse.json(result);
-  } catch (err) {
-    console.warn("[analyze] Gemini failed:", err instanceof Error ? err.message : err);
-  }
+    const body = await req.json();
+    const { persona = "General", platform = "SMS" } = body;
+    message = body.message;
 
-  // 2️⃣ OpenAI (secondary)
-  try {
-    const result = await tryOpenAI(message, persona);
-    return NextResponse.json(result);
-  } catch (err) {
-    console.warn("[analyze] OpenAI failed:", err instanceof Error ? err.message : err);
-  }
+    if (!message) {
+      return NextResponse.json({ error: "No message provided" }, { status: 400 });
+    }
 
-  // 3️⃣ Keyword-based mock (last resort)
-  console.warn("[analyze] All APIs failed — using smart mock fallback");
-  return NextResponse.json(smartMockResponse(message));
+    // Direct Gemini Call
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error("No Gemini key");
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+    
+    // Call Gemini
+    const prompt = `You are a highly calibrated scam detection AI.
+Analyze this message and return ONLY raw JSON, no markdown, no backticks.
+
+Message: "${message}"
+Persona: "${persona || 'General'}"
+
+CALIBRATION RULES — follow exactly:
+
+Score 0-15 → risk: "Safe" → Examples: "hi", "see you tomorrow", "lunch at 3pm"
+Score 16-30 → risk: "Safe" → Examples: "Your OTP is 4521", "Meeting confirmed"
+Score 31-50 → risk: "Suspicious" → Examples: "You may have won", "Contact us for offer"
+Score 51-69 → risk: "Suspicious" → Examples: "Verify your account", unknown sender requests
+Score 70-85 → risk: "Scam" → Examples: "Click link to unblock account", fake prize claims
+Score 86-100 → risk: "Scam" → Examples: bank impersonation + link + urgency combined
+
+DYNAMIC SCORING — score based on these weighted factors:
++10 if contains urgent language (URGENT, immediately, blocked, suspended)
++15 if contains suspicious URL or non-official domain
++20 if impersonates bank, government, or known brand
++15 if requests OTP, password, Aadhaar, bank details
++10 if contains prize/reward/lottery claim
++10 if contains fear tactics (account blocked, legal action)
++5 if unknown sender pattern
+-30 if message is casual conversation
+-20 if message contains only OTP number with no link
+-10 if message is from known official format
+
+Start from base score 10, add/subtract factors above.
+Final score MUST reflect actual message content — never default to 60.
+
+Return exactly:
+{
+  "risk": "Safe" or "Suspicious" or "Scam",
+  "score": <calculated 0-100>,
+  "type": "Phishing" or "Lottery" or "OTP Fraud" or "Job Scam" or "Unknown",
+  "reason": "specific 1-2 sentence explanation referencing exact message content",
+  "triggers": ["exact phrases from message"],
+  "advice": ["specific step 1", "step 2", "step 3"],
+  "confidence": "Low" or "Medium" or "High",
+  "rewrite": "safe version or empty string if Safe",
+  "severity": {
+    "factors": ["specific factor from this message"],
+    "breakdown": "exact calculation explanation"
+  },
+  "language": "English" or "Tamil" or "Hindi" or "Mixed" or "Unknown",
+  "pattern": "Known Scam Template" or "Unique Pattern" or "Partial Match",
+  "tags": ["Urgency", "Financial Lure", "Suspicious Link", "Fear", "Reward", "Impersonation"],
+  "urls": [{"url": "url", "verdict": "Suspicious Domain" or "Not Official Domain" or "Safe"}],
+  "patterns": {"urgency": true or false, "fear": true or false, "reward": true or false}
+}`;
+
+    const aiResult = await model.generateContent(prompt);
+    const text = aiResult.response.text();
+
+    // 1) LOG RAW AI RESPONSE (VERY IMPORTANT)
+    console.log("RAW AI RESPONSE:", text)
+
+    // 2) SAFE JSON PARSE (FIX BREAKAGE)
+    let parsed
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : null
+      if (parsed) {
+        parsed.consequence ||= "";
+        parsed.pressure ||= "";
+        parsed.personaInsight ||= "";
+      }
+    } catch (e) {
+      console.log("PARSE ERROR:", e)
+      parsed = null
+    }
+
+    // 3) HARD FALLBACK IF PARSE FAILS
+    if (!parsed) {
+      console.log("USING FALLBACK")
+      const lower = message.toLowerCase()
+
+      if (/(win|lottery|prize|click|urgent|otp|verify|account|bank)/i.test(lower)) {
+        return NextResponse.json({
+          risk: "Scam",
+          score: 80,
+          type: "Phishing",
+          reason: "Detected scam keywords",
+          triggers: ["urgent", "click"],
+          tags: ["Urgency"],
+          patterns: { urgency: true, fear: false, reward: true },
+          confidence: "Medium",
+          advice: ["Do not interact"],
+          rewrite: "Ignore this message"
+        }, {
+          headers: { "X-AI-Provider": "fallback-parse" },
+        })
+      }
+
+      return NextResponse.json({
+        risk: "Safe",
+        score: 20,
+        type: "Unknown",
+        reason: "No scam indicators",
+        triggers: [],
+        tags: [],
+        patterns: { urgency: false, fear: false, reward: false },
+        confidence: "High",
+        advice: ["No action needed"],
+        rewrite: message
+      }, {
+        headers: { "X-AI-Provider": "fallback-safe" },
+      })
+    }
+
+    // 4) FORCE CORRECT RISK (ANTI-BIAS FIX)
+    const lower = message.toLowerCase()
+
+    if (/(win|lottery|prize|free money)/i.test(lower)) {
+      parsed.risk = "Scam"
+      parsed.score = 85
+    }
+    else if (/(click|link|verify|account|otp|bank|urgent)/i.test(lower)) {
+      if (parsed.risk === "Safe") {
+        parsed.risk = "Suspicious"
+        parsed.score = 60
+      }
+    }
+
+    // 5) FINAL LOG
+    console.log("FINAL OUTPUT:", parsed)
+
+    // 6) RETURN
+    return NextResponse.json(parsed, {
+      headers: { "X-AI-Provider": "gemini-corrected" },
+    });
+
+  } catch (error: any) {
+    console.error("[analyze] Global Error:", error.message || error);
+    if (error.stack) console.error(error.stack);
+    
+    const fallback = smartMockResponse(message);
+    return NextResponse.json(fallback, {
+      headers: { "X-AI-Provider": "global-fallback" },
+    });
+  }
 }

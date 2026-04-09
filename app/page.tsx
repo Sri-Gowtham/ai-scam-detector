@@ -1,40 +1,43 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 
-type RiskLevel = "Safe" | "Suspicious" | "Scam";
-
-type ScamType = "Phishing" | "Lottery" | "OTP Fraud" | "Job Scam" | "Unknown";
-
-type Confidence = "Low" | "Medium" | "High";
-
-type Persona = "General" | "Student" | "Elderly" | "Employee";
-
-type ScamTag = "Urgency" | "Financial Lure" | "Suspicious Link" | "Fear" | "Reward" | "Impersonation";
-
-type UrlVerdict = "Suspicious Domain" | "Not Official Domain" | "Safe";
-
-interface DetectedUrl {
-  url: string;
-  verdict: UrlVerdict;
+// --- Voice Recognition Types ---
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
 }
 
-interface AnalysisResult {
-  risk: RiskLevel;
-  score: number;
-  type: ScamType;
-  reason: string;
-  triggers: string[];
-  advice: string[];
-  confidence: Confidence;
-  rewrite: string;
-  severity?: { factors: string[]; breakdown: string };
-  language?: string;
-  pattern?: string;
-  tags?: ScamTag[];
-  urls?: DetectedUrl[];
-  patterns?: { urgency: boolean; fear: boolean; reward: boolean };
+interface SpeechRecognitionEvent extends Event {
+  results: {
+    length: number;
+    [key: number]: {
+      length: number;
+      [key: number]: {
+        transcript: string;
+      };
+      isFinal: boolean;
+    };
+  };
+  resultIndex: number;
 }
+
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
+  }
+}
+
+import { 
+  RiskLevel, 
+  ScamType, 
+  Confidence, 
+  Persona, 
+  DetectedUrl, 
+  UrlVerdict, 
+  AnalysisResult 
+} from "@/lib/scam-logic";
 
 interface ScanHistoryItem {
   message: string;
@@ -78,7 +81,7 @@ const CONFIDENCE_STYLES: Record<Confidence, string> = {
   Low: "bg-white/10 text-white/50 border-white/20",
 };
 
-const TAG_STYLES: Record<ScamTag, string> = {
+const TAG_STYLES: Record<string, string> = {
   Urgency: "bg-rose-500/15 border-rose-500/30 text-rose-300",
   Fear: "bg-rose-500/15 border-rose-500/30 text-rose-300",
   "Financial Lure": "bg-yellow-500/15 border-yellow-500/30 text-yellow-300",
@@ -101,7 +104,78 @@ const EXAMPLES = [
   "Hey! Are you free for lunch tomorrow? I found a great new place nearby.",
 ];
 
-export default function Home() {
+function HomeContent() {
+  function getConsequence(result: AnalysisResult | null) {
+    if (!result) return ""
+
+    const type = result.type?.toLowerCase() || ""
+    const patterns = result.patterns || { urgency: false, fear: false, reward: false }
+
+    if (type.includes("phishing") || patterns.urgency) {
+      return "This can trick you into giving sensitive details within seconds."
+    }
+
+    if (type.includes("otp")) {
+      return "Sharing your OTP can lead to instant account takeover."
+    }
+
+    if (type.includes("lottery") || patterns.reward) {
+      return "You may lose money by paying fake fees for a non-existent reward."
+    }
+
+    return "Interacting with this message may expose your personal or financial information."
+  }
+
+  function getPressureWarning(result: AnalysisResult | null) {
+    if (!result) return ""
+
+    const tags = result.tags || []
+    const patterns = result.patterns || { urgency: false, fear: false, reward: false }
+
+    if (
+      tags.includes("Urgency") ||
+      tags.includes("Fear") ||
+      patterns.urgency ||
+      patterns.fear
+    ) {
+      return "This message is trying to rush or pressure you."
+    }
+
+    if (
+      tags.includes("Financial Lure") ||
+      patterns.reward
+    ) {
+      return "This message is tempting you with rewards to manipulate you."
+    }
+
+    return ""
+  }
+
+  function getPersonaInsight(result: AnalysisResult | null, persona: Persona) {
+    if (!result || !persona) return ""
+
+    const type = result.type?.toLowerCase() || ""
+
+    if (persona === "Student" && type.includes("job")) {
+      return "This scam often targets students with fake job or internship offers."
+    }
+
+    if (persona === "Elderly" && type.includes("phishing")) {
+      return "This type of scam frequently targets elderly users by impersonating trusted institutions."
+    }
+
+    if (persona === "Employee" && type.includes("otp")) {
+      return "Employees are often targeted through OTP or account verification scams."
+    }
+
+    if (type.includes("lottery")) {
+      return "This scam targets users by exploiting excitement and reward-based thinking."
+    }
+
+    return "This scam can affect anyone if proper caution is not taken."
+  }
+
+  const searchParams = useSearchParams();
   const [message, setMessage] = useState("");
   const [persona, setPersona] = useState<Persona>("General");
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -111,12 +185,44 @@ export default function Home() {
   const [history, setHistory] = useState<ScanHistoryItem[]>([]);
   const [animatedScore, setAnimatedScore] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [aiProvider, setAiProvider] = useState<"anthropic" | "gemini" | "fallback" | null>(null);
   const [whyOpen, setWhyOpen] = useState(false);
+  const [actionMsg, setActionMsg] = useState("");
   const [timelineStep, setTimelineStep] = useState(0);
   const [resultVisible, setResultVisible] = useState(false);
   const [inputType, setInputType] = useState<"Message" | "Link" | "Phone">("Message");
   const [simulateMode, setSimulateMode] = useState(false);
+  const [inputWarning, setInputWarning] = useState("");
+  const [platform, setPlatform] = useState("SMS");
+  const [isListening, setIsListening] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [panicOpen, setPanicOpen] = useState(false);
+
+  // Screenshot States
+  const [activeTab, setActiveTab] = useState<"text" | "image">("text");
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [extractionStep, setExtractionStep] = useState<0 | 1>(0); // 0: Extracting, 1: Analyzing
+  const [extractedText, setExtractedText] = useState<string | null>(null);
+  const [showExtractedText, setShowExtractedText] = useState(false);
+
   const scoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resultRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<any>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Auto-fill from URL query param
+  useEffect(() => {
+    const msg = searchParams.get("msg");
+    if (msg) {
+      const decoded = decodeURIComponent(msg);
+      setMessage(decoded);
+      // Auto-analyze after a short delay to ensure UI is ready
+      setTimeout(() => {
+        analyze(decoded);
+      }, 500);
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     try {
@@ -171,6 +277,12 @@ export default function Home() {
     return () => { if (scoreTimerRef.current) clearTimeout(scoreTimerRef.current); };
   }, [result]);
 
+  useEffect(() => {
+    if (result?.risk === "Scam") {
+      setPanicOpen(true);
+    }
+  }, [result]);
+
   // Mini stats derived from history
   const stats = useMemo(() => {
     const total = history.length;
@@ -197,8 +309,86 @@ export default function Home() {
     } catch {}
   };
 
+  const toggleListening = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceError("Voice input not supported in this browser");
+      setTimeout(() => setVoiceError(null), 3000);
+      return;
+    }
+
+    if (!recognitionRef.current) {
+      const recognition = new SpeechRecognition();
+      recognition.lang = "en-IN";
+      recognition.continuous = false;
+      recognition.interimResults = true;
+
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
+        let transcript = "";
+        for (let i = 0; i < event.results.length; i++) {
+          transcript += (event.results as any)[i][0].transcript;
+        }
+        setMessage(transcript);
+        
+        // Reset silence timer on every result
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => {
+          recognition.stop();
+        }, 10000);
+      };
+
+      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+        setVoiceError(`Error: ${event.error}`);
+        setIsListening(false);
+        setTimeout(() => setVoiceError(null), 3000);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      };
+
+      recognitionRef.current = recognition;
+    }
+
+    setVoiceError(null);
+    setIsListening(true);
+    try {
+      recognitionRef.current.start();
+      // Initial silence timer
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = setTimeout(() => {
+        recognitionRef.current?.stop();
+      }, 10000);
+    } catch (e) {
+      console.error("Speech recognition start failed:", e);
+      setIsListening(false);
+    }
+  };
+
   const analyze = async (msg: string = message) => {
-    if (!msg.trim()) return;
+    if (!msg.trim()) {
+      setInputWarning("Please enter a message to analyze");
+      return;
+    }
+
+    if (msg.trim().length < 10) {
+      setInputWarning("Message too short to analyze properly");
+      return;
+    }
+
+    if (!/(urgent|click|win|offer|account|verify|link|bank|otp)/i.test(msg)) {
+      setInputWarning("⚠️ This message may not contain typical scam indicators");
+    } else {
+      setInputWarning("");
+    }
+
     setLoading(true);
     setError(null);
     setResult(null);
@@ -208,18 +398,87 @@ export default function Home() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg, persona }),
+        body: JSON.stringify({ message: msg, persona, platform }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Analysis failed");
+      setAiProvider((res.headers.get("X-AI-Provider") as "anthropic" | "gemini" | "fallback") ?? null);
       setResult(data);
       setMessage(msg);
       saveToHistory(msg, data);
       setTimelineStep(4); // mark all steps complete
       // Trigger fade-in on next paint
-      setTimeout(() => setResultVisible(true), 30);
+      setTimeout(() => {
+        setResultVisible(true);
+        resultRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 200);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) {
+        setError("Image is too large (max 5MB)");
+        return;
+      }
+      setSelectedImage(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const analyzeScreenshot = async () => {
+    if (!selectedImage || !imagePreview) return;
+
+    setLoading(true);
+    setExtractionStep(0);
+    setError(null);
+    setResult(null);
+    setExtractedText(null);
+    setResultVisible(false);
+
+    try {
+      const res = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64: imagePreview,
+          mimeType: selectedImage.type,
+          persona,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Extraction failed");
+
+      setExtractionStep(1); // Moving to analysis step animation
+      setExtractedText(data.extractedText);
+      setAiProvider((res.headers.get("X-AI-Provider") as "anthropic" | "gemini" | "fallback") ?? null);
+      setMessage(data.extractedText); // Pre-fill message with extracted text
+      setResult(data.analysis);
+      saveToHistory(data.extractedText, data.analysis);
+      setTimelineStep(4);
+
+      setTimeout(() => {
+        setResultVisible(true);
+        resultRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 200);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Image analysis failed");
     } finally {
       setLoading(false);
     }
@@ -361,6 +620,7 @@ Generated by AI Scam Detector
     setLoading(false);
     setResultVisible(false);
     setTimelineStep(0);
+    setInputWarning("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -408,69 +668,197 @@ Generated by AI Scam Detector
           </div>
         )}
 
+        {/* ── TAB SWITCHER ── */}
+        <div className="flex bg-white/5 border border-white/10 rounded-xl p-1 mb-4 backdrop-blur-sm">
+          <button
+            onClick={() => setActiveTab("text")}
+            className={`flex-1 py-2.5 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-2 ${
+              activeTab === "text" ? "bg-white/10 text-white shadow-lg" : "text-white/40 hover:text-white/60"
+            }`}
+          >
+            <span>📝</span> Paste Text
+          </button>
+          <button
+            onClick={() => setActiveTab("image")}
+            className={`flex-1 py-2.5 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-2 ${
+              activeTab === "image" ? "bg-white/10 text-white shadow-lg" : "text-white/40 hover:text-white/60"
+            }`}
+          >
+            <span>📸</span> Scan Screenshot
+          </button>
+        </div>
+
         {/* Input Card */}
         <div className="bg-white/[0.03] border border-white/10 rounded-2xl p-5 sm:p-6 mb-4 backdrop-blur-sm">
-          {/* Persona selector */}
-          <div className="flex items-center justify-between mb-3">
+          {/* Persona selector row stays common */}
+          <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
-              <label className="text-xs text-white/40 uppercase tracking-widest">
-                Message to Analyze
+              <label className="text-xs text-white/40 uppercase tracking-widest font-semibold">
+                {activeTab === "text" ? "Analyze Message" : "Analyze Screenshot"}
               </label>
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setSimulateMode(!simulateMode)}
-                  className={`px-3 py-1 text-[10px] rounded-lg border transition-all flex items-center gap-1.5
-                    ${simulateMode 
-                      ? "bg-red-500/20 text-red-300 border-red-500/40" 
-                      : "border-white/10 text-white/50 hover:text-white hover:bg-white/10"}
-                  `}
-                >
-                  ⚠️ Simulate Attack
-                </button>
-                {(message || result) && (
+                {activeTab === "text" && (
                   <button
-                    onClick={handleReset}
+                    onClick={() => setSimulateMode(!simulateMode)}
+                    className={`px-3 py-1 text-[10px] rounded-lg border transition-all flex items-center gap-1.5
+                      ${simulateMode 
+                        ? "bg-red-500/20 text-red-300 border-red-500/40" 
+                        : "border-white/10 text-white/50 hover:text-white hover:bg-white/10"}
+                    `}
+                  >
+                    ⚠️ Simulate Attack
+                  </button>
+                )}
+                {(message || selectedImage || result) && (
+                  <button
+                    onClick={() => {
+                      handleReset();
+                      setSelectedImage(null);
+                      setImagePreview(null);
+                      setExtractedText(null);
+                    }}
                     className="px-3 py-1 text-[10px] rounded-lg border border-white/10 
                                text-white/50 hover:text-white hover:bg-white/10 transition-all flex items-center gap-1.5"
                   >
-                    🔄 Start New Scan
+                    🔄 Clear All
                   </button>
                 )}
               </div>
             </div>
-            <div className="relative">
-              <select
-                id="persona-select"
-                value={persona}
-                onChange={(e) => setPersona(e.target.value as Persona)}
-                className="appearance-none bg-white/5 border border-white/10 rounded-lg pl-3 pr-7 py-1 text-xs text-white/60 focus:outline-none focus:border-violet-500/50 cursor-pointer transition-colors hover:bg-white/10"
-              >
-                {PERSONAS.map((p) => (
-                  <option key={p} value={p} className="bg-[#1a1a1f] text-white">
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-white/30 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-              </svg>
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <select
+                  id="platform-select"
+                  value={platform}
+                  onChange={(e) => setPlatform(e.target.value)}
+                  className="appearance-none bg-white/5 border border-white/10 rounded-lg pl-3 pr-7 py-1 text-xs text-white/60 focus:outline-none focus:border-violet-500/50 cursor-pointer transition-colors hover:bg-white/10"
+                >
+                  <option className="bg-[#1a1a1f] text-white">SMS</option>
+                  <option className="bg-[#1a1a1f] text-white">WhatsApp</option>
+                  <option className="bg-[#1a1a1f] text-white">Email</option>
+                </select>
+                <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-white/30 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+
+              <div className="relative">
+                <select
+                  id="persona-select"
+                  value={persona}
+                  onChange={(e) => setPersona(e.target.value as Persona)}
+                  className="appearance-none bg-white/5 border border-white/10 rounded-lg pl-3 pr-7 py-1 text-xs text-white/60 focus:outline-none focus:border-violet-500/50 cursor-pointer transition-colors hover:bg-white/10"
+                >
+                  {PERSONAS.map((p) => (
+                    <option key={p} value={p} className="bg-[#1a1a1f] text-white">
+                      {p}
+                    </option>
+                  ))}
+                </select>
+                <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-white/30 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
             </div>
           </div>
 
-          <textarea
-            id="message-input"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Paste an SMS, email, or any suspicious message here..."
-            rows={5}
-            className={`w-full p-4 rounded-xl bg-white/5 text-white text-sm placeholder-white/20 resize-none focus:outline-none border-2 transition-all duration-300 ${
-              inputType === "Link"
-                ? "border-blue-500"
-                : inputType === "Phone"
-                ? "border-purple-500"
-                : "border-gray-500"
-            }`}
-          />
+          {activeTab === "text" ? (
+            <>
+              <div className="relative group">
+                <textarea
+                  id="message-input"
+                  value={message}
+                  onChange={(e) => {
+                    setMessage(e.target.value);
+                    setInputWarning("");
+                  }}
+                  placeholder={
+                    platform === "SMS"
+                      ? "Paste SMS message..."
+                      : platform === "WhatsApp"
+                      ? "Paste WhatsApp message..."
+                      : "Paste email content..."
+                  }
+                  rows={5}
+                  className={`w-full p-4 pr-12 rounded-xl bg-white/5 text-white text-sm placeholder-white/20 resize-none focus:outline-none border-2 transition-all duration-300 ${
+                    inputType === "Link"
+                      ? "border-blue-500"
+                      : inputType === "Phone"
+                      ? "border-purple-500"
+                      : "border-gray-500"
+                  }`}
+                />
+                <button
+                  onClick={toggleListening}
+                  className={`absolute bottom-3 right-3 p-2.5 rounded-full transition-all duration-300 z-10 ${
+                    isListening 
+                      ? "bg-rose-500 text-white animate-pulse ring-4 ring-rose-500/20 shadow-[0_0_15px_rgba(244,63,94,0.5)]" 
+                      : "bg-white/10 text-white/40 hover:bg-white/20 hover:text-white"
+                  }`}
+                  title={isListening ? "Stop Recording" : "Start Voice Input"}
+                >
+                  {isListening ? "🔴" : "🎙️"}
+                </button>
+              </div>
+
+              {isListening && (
+                <div className="mt-2 text-[10px] text-rose-400 flex items-center gap-1.5 animate-pulse font-medium uppercase tracking-widest px-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                  Listening...
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="space-y-4">
+              {!imagePreview ? (
+                <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-dashed border-white/10 rounded-xl hover:border-violet-500/50 hover:bg-white/[0.02] transition-all cursor-pointer group">
+                  <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                    <div className="p-3 bg-white/5 rounded-full mb-3 group-hover:scale-110 transition-transform">
+                      <span className="text-2xl">📸</span>
+                    </div>
+                    <p className="text-sm text-white/60">
+                      <span className="font-semibold text-white/90">Click to upload</span> or drag and drop
+                    </p>
+                    <p className="text-xs text-white/30 mt-1">PNG, JPG or WebP (Max 5MB)</p>
+                  </div>
+                  <input type="file" className="hidden" accept="image/*" onChange={handleImageChange} />
+                </label>
+              ) : (
+                <div className="relative overflow-hidden rounded-xl border border-white/10 bg-black/20 group">
+                  <img src={imagePreview} alt="Preview" className="w-full h-auto max-h-[200px] object-contain" />
+                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                    <button
+                      onClick={() => {
+                        setSelectedImage(null);
+                        setImagePreview(null);
+                      }}
+                      className="p-2 bg-rose-500 rounded-full text-white shadow-lg transform hover:scale-110 transition-transform"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              )}
+              {selectedImage && !loading && !result && (
+                <div className="flex items-center justify-between bg-white/5 rounded-lg px-3 py-2 border border-white/5">
+                  <span className="text-[10px] text-white/40 truncate flex-1 mr-2">{selectedImage.name}</span>
+                  <span className="text-[10px] text-white/20">{(selectedImage.size / 1024 / 1024).toFixed(2)} MB</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {voiceError && (
+            <div className="mt-2 text-xs text-rose-500 bg-rose-500/10 border border-rose-500/20 rounded-lg px-3 py-2">
+              {voiceError}
+            </div>
+          )}
+
+          {inputWarning && (
+            <div className="mt-2 text-xs text-yellow-300 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2">
+              {inputWarning}
+            </div>
+          )}
 
           {/* Input type badge — always visible */}
           <div className="mt-3 flex justify-between items-center">
@@ -486,9 +874,6 @@ Generated by AI Scam Detector
               {inputType === "Message" && "📝 Message Mode"}
               {inputType === "Link" && "🔗 Link Analysis Mode"}
               {inputType === "Phone" && "📞 Phone Check Mode"}
-            </div>
-            <div className="text-xs text-white/40">
-              Debug: {inputType}
             </div>
           </div>
 
@@ -506,25 +891,46 @@ Generated by AI Scam Detector
             ))}
           </div>
 
-          <div className="flex gap-2">
-            <button
-              id="analyze-btn"
-              onClick={() => analyze()}
-              disabled={loading || !message.trim()}
-              className="flex-1 py-3 rounded-xl font-semibold text-sm tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 hover:shadow-lg hover:shadow-violet-500/20 active:scale-[0.99]"
-            >
-              {loading ? (
-                <span className="flex items-center justify-center gap-2">
-                  <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                  </svg>
-                  <span className="transition-all duration-300">{LOADING_STEPS[loadingStep]}</span>
-                </span>
-              ) : (
-                "Analyze Message"
-              )}
-            </button>
+          <div className="flex gap-2 mt-4">
+            {activeTab === "text" ? (
+              <button
+                id="analyze-btn"
+                onClick={() => analyze()}
+                disabled={loading || !message.trim()}
+                className="flex-1 py-3 rounded-xl font-semibold text-sm tracking-wide transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 hover:shadow-lg hover:shadow-violet-500/20 active:scale-95"
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                    </svg>
+                    <span className="transition-all duration-300">{LOADING_STEPS[loadingStep]}</span>
+                  </span>
+                ) : (
+                  "Analyze Message"
+                )}
+              </button>
+            ) : (
+              <button
+                id="analyze-screenshot-btn"
+                onClick={analyzeScreenshot}
+                disabled={loading || !selectedImage}
+                className="flex-1 py-3 rounded-xl font-semibold text-sm tracking-wide transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 hover:shadow-lg hover:shadow-violet-500/20 active:scale-95"
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                    </svg>
+                    <span>{extractionStep === 0 ? "Extracting text..." : "Analyzing text..."}</span>
+                  </span>
+                ) : (
+                  "🔍 Analyze Screenshot"
+                )}
+              </button>
+            )}
           </div>
         </div>
 
@@ -546,7 +952,9 @@ Generated by AI Scam Detector
                 <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: "300ms" }} />
               </div>
               <span className="text-sm text-violet-300/80 transition-all duration-300">
-                {LOADING_STEPS[loadingStep]}
+                {activeTab === "image" && !extractedText
+                  ? (extractionStep === 0 ? "📸 Extracting text from image..." : "🤖 Analyzing extracted text...")
+                  : LOADING_STEPS[loadingStep] + ` · ${platform}`}
               </span>
             </div>
             {/* Shimmer lines */}
@@ -619,7 +1027,42 @@ Generated by AI Scam Detector
 
         {/* Result Card + Trust Badge */}
         {result && cfg && (
-          <>
+          <div ref={resultRef}>
+            {/* ── EXTRACTED TEXT COLLAPSIBLE ── */}
+            {activeTab === "image" && extractedText && (
+              <div className="mb-4 border border-white/10 rounded-xl overflow-hidden bg-white/5 backdrop-blur-sm">
+                <button
+                  onClick={() => setShowExtractedText(!showExtractedText)}
+                  className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.04] transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-white/60 uppercase tracking-widest flex items-center gap-2">
+                      <span className="text-sm">📝</span> Extracted Text
+                    </span>
+                    <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">SUCCESS</span>
+                  </div>
+                  <svg
+                    className={`w-4 h-4 text-white/30 transition-transform duration-300 ${
+                      showExtractedText ? "rotate-180" : "rotate-0"
+                    }`}
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                <div
+                  className="transition-all duration-300 ease-in-out overflow-hidden"
+                  style={{ maxHeight: showExtractedText ? "300px" : "0px" }}
+                >
+                  <div className="px-4 pb-4">
+                    <div className="bg-black/30 rounded-lg p-3 text-xs text-white/50 leading-relaxed font-mono whitespace-pre-wrap border border-white/5">
+                      {extractedText}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* ── TRUST BADGE ── */}
             {(() => {
               const TRUST_BADGE: Record<
@@ -681,10 +1124,30 @@ Generated by AI Scam Detector
               )}
               <div
                 id="result-card"
-                className={`border rounded-2xl p-5 sm:p-6 mb-4 backdrop-blur-sm ${cfg.bg} ${cfg.border} transition-all duration-500 ${
+                className={`relative border rounded-2xl p-5 sm:p-6 mb-4 backdrop-blur-sm ${cfg.bg} ${cfg.border} transition-all duration-500 hover:shadow-[0_0_20px_rgba(139,92,246,0.2)] ${
                   resultVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
                 }`}
               >
+                {/* ── AI PROVIDER BADGE ── */}
+                {aiProvider && (
+                  <div className="absolute top-3 right-3">
+                    {aiProvider === "anthropic" && (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-blue-500/15 border border-blue-500/30 text-blue-300 tracking-wide">
+                        ⚡ Analyzed by Claude
+                      </span>
+                    )}
+                    {aiProvider === "gemini" && (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 tracking-wide">
+                        ⚡ Analyzed by Gemini
+                      </span>
+                    )}
+                    {aiProvider === "fallback" && (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-white/10 border border-white/20 text-white/40 tracking-wide">
+                        ⚡ Analyzed by Fallback
+                      </span>
+                    )}
+                  </div>
+                )}
             {/* Risk badge + confidence + score */}
             <div className="flex items-center justify-between mb-4">
               <div className={`flex items-center gap-2.5 ${cfg.color}`}>
@@ -788,40 +1251,16 @@ Generated by AI Scam Detector
             </div>
 
             {/* ── PATTERN INDICATORS ── */}
-            {result.patterns && (
-              <div className="flex items-center gap-4 mb-5 py-2.5 px-3 bg-white/[0.03] rounded-xl border border-white/8">
-                <div className="flex items-center gap-1.5 text-xs text-white/50">
-                  <span
-                    className={`w-2 h-2 rounded-full ${result.patterns.urgency ? "bg-rose-400" : "bg-white/20"}`}
-                  />
-                  {result.patterns.urgency ? (
-                    <span className="text-rose-300">Urgency Detected</span>
-                  ) : (
-                    <span>No Urgency</span>
-                  )}
-                </div>
-                <div className="w-px h-3.5 bg-white/10" />
-                <div className="flex items-center gap-1.5 text-xs text-white/50">
-                  <span
-                    className={`w-2 h-2 rounded-full ${result.patterns.fear ? "bg-rose-400" : "bg-white/20"}`}
-                  />
-                  {result.patterns.fear ? (
-                    <span className="text-rose-300">Fear Tactics</span>
-                  ) : (
-                    <span>No Fear</span>
-                  )}
-                </div>
-                <div className="w-px h-3.5 bg-white/10" />
-                <div className="flex items-center gap-1.5 text-xs text-white/50">
-                  <span
-                    className={`w-2 h-2 rounded-full ${result.patterns.reward ? "bg-amber-400" : "bg-white/20"}`}
-                  />
-                  {result.patterns.reward ? (
-                    <span className="text-amber-300">Reward Bait</span>
-                  ) : (
-                    <span>No Reward</span>
-                  )}
-                </div>
+            {result.patterns && (result.patterns.urgency || result.patterns.fear || result.patterns.reward) && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-5 py-2.5 px-3 bg-white/[0.03] rounded-xl border border-white/8">
+                {Object.entries(result.patterns)
+                  .filter(([_, v]) => v)
+                  .map(([k], i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-xs text-white/50">
+                      <span className="w-1.5 h-1.5 rounded-full bg-violet-400/60" />
+                      <span className="text-white/70 capitalize">{k}</span>
+                    </div>
+                  ))}
               </div>
             )}
 
@@ -958,36 +1397,106 @@ Generated by AI Scam Detector
               </div>
             )}
 
-            {/* ── ACTION BUTTONS ── */}
-            {showActionButtons && (
-              <div className="mb-4">
-                <p className="text-xs text-white/30 uppercase tracking-widest mb-2.5">Quick Actions</p>
-                <div className="grid grid-cols-3 gap-2">
+            {result && result.risk !== "Safe" && (
+              <div className="mt-4 p-3 rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 animate-pulse">
+                <p className="text-xs">
+                  ⏱ {result.consequence || getConsequence(result)}
+                </p>
+              </div>
+            )}
+
+            {result && result.risk !== "Safe" && (result.pressure || getPressureWarning(result)) && (
+              <div className="mt-3 p-3 rounded-xl border border-yellow-500/30 bg-yellow-500/10 text-yellow-300">
+                <p className="text-xs">
+                  ⚠️ {result.pressure || getPressureWarning(result)}
+                </p>
+              </div>
+            )}
+
+            {result && result.risk !== "Safe" && (
+              <div className="mt-3 p-3 rounded-xl border border-purple-500/30 bg-purple-500/10 text-purple-300">
+                <p className="text-xs">
+                  🧑‍🎓 {result.personaInsight || getPersonaInsight(result, persona)}
+                </p>
+              </div>
+            )}
+            
+            {/* ── WHAT SHOULD YOU DO RIGHT NOW? ── */}
+            {result && result.risk !== "Safe" && (
+              <div className={`mt-5 p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm transition-all duration-300 ${panicOpen ? 'opacity-75' : 'hover:shadow-[0_0_20px_rgba(139,92,246,0.15)]'}`}>
+                <p className="text-sm font-bold text-white flex items-center gap-2">
+                  <span>⚡</span> What Should You Do RIGHT NOW?
+                </p>
+                <p className="text-xs text-white/50 mb-3">
+                  Immediate actions to stay safe
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <button
-                    id="action-no-click"
-                    onClick={() => alert("Stay safe! Do not click any links in this message.")}
-                    className="flex flex-col items-center gap-1.5 py-2.5 px-2 rounded-xl border border-rose-500/40 text-rose-400 bg-rose-500/5 hover:bg-rose-500/15 transition-all text-[11px] font-semibold text-center"
+                    onClick={() => {
+                      setActionMsg("Action noted. Follow official steps to stay safe.");
+                      setTimeout(() => setActionMsg(""), 2000);
+                    }}
+                    className="flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border border-rose-500/40 text-rose-400 bg-rose-500/5 hover:bg-rose-500/15 transition-all text-[11px] font-semibold text-center"
                   >
                     <span className="text-base">🚫</span>
-                    <span>Do NOT Click Links</span>
+                    <span>Block Sender Immediately</span>
                   </button>
                   <button
-                    id="action-report-scam"
-                    onClick={() => window.open("https://cybercrime.gov.in", "_blank")}
-                    className="flex flex-col items-center gap-1.5 py-2.5 px-2 rounded-xl border border-orange-500/40 text-orange-400 bg-orange-500/5 hover:bg-orange-500/15 transition-all text-[11px] font-semibold text-center"
+                    onClick={() => {
+                      setActionMsg("Action noted. Follow official steps to stay safe.");
+                      window.open("https://cybercrime.gov.in", "_blank");
+                      setTimeout(() => setActionMsg(""), 2000);
+                    }}
+                    className="flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border border-orange-500/40 text-orange-400 bg-orange-500/5 hover:bg-orange-500/15 transition-all text-[11px] font-semibold text-center"
                   >
-                    <span className="text-base">🚨</span>
-                    <span>Report Scam</span>
+                    <span className="text-base">📢</span>
+                    <span>Report This Scam</span>
                   </button>
                   <button
-                    id="action-block-sender"
-                    onClick={() => alert("Go to your phone settings → Block this number immediately.")}
-                    className="flex flex-col items-center gap-1.5 py-2.5 px-2 rounded-xl border border-white/20 text-white/50 bg-white/5 hover:bg-white/10 transition-all text-[11px] font-semibold text-center"
+                    onClick={() => {
+                      setActionMsg("Action noted. Follow official steps to stay safe.");
+                      setTimeout(() => setActionMsg(""), 2000);
+                    }}
+                    className="flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border border-white/20 text-white/50 bg-white/5 hover:bg-white/10 transition-all text-[11px] font-semibold text-center"
                   >
-                    <span className="text-base">🚷</span>
-                    <span>Block Sender</span>
+                    <span className="text-base">🔐</span>
+                    <span>Secure Your Account</span>
                   </button>
                 </div>
+                {actionMsg && (
+                  <p className="text-xs text-green-400 mt-2 animate-fadeIn text-center font-medium">
+                    {actionMsg}
+                  </p>
+                )}
+
+                {result && result.risk !== "Safe" && (
+                  <button
+                    onClick={() => setPanicOpen(!panicOpen)}
+                    className="w-full mt-4 px-5 py-3 rounded-xl bg-red-500/20 
+                               border border-red-500/50 text-red-300 font-semibold text-base
+                               hover:bg-red-500/40 hover:scale-[1.02] hover:shadow-red-500/20 
+                               hover:shadow-lg active:scale-[0.98] transition-all duration-200 
+                               cursor-pointer flex items-center justify-between gap-2"
+                  >
+                    <span className="flex items-center gap-2">🚨 I Already Clicked Something — Get Help Now</span>
+                    <span className="text-sm">{panicOpen ? '▲' : '▼'}</span>
+                  </button>
+                )}
+
+                {panicOpen && (
+                  <div className="mt-3 p-4 rounded-2xl border-2 border-red-500 bg-red-500/10 text-red-200 shadow-lg shadow-red-500/20 animate-pulse transition-all duration-300 ease-out animate-slideUp">
+                    <h3 className="text-sm font-bold mb-3 flex items-center gap-2">
+                       🚨 Immediate Damage Control
+                    </h3>
+                    <ul className="text-xs space-y-2 list-disc pl-4 opacity-90 font-medium">
+                      <li>Change your passwords immediately</li>
+                      <li>Contact your bank or payment provider</li>
+                      <li>Enable 2FA on all important accounts</li>
+                      <li>Check recent transactions for suspicious activity</li>
+                      <li>Do not click further links or respond</li>
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1007,7 +1516,7 @@ Generated by AI Scam Detector
           </div>
           </div>
           </div>
-          </>
+          </div>
         )}
 
         {/* Scan History */}
@@ -1050,5 +1559,19 @@ Generated by AI Scam Detector
         </p>
       </div>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#0d0d0f] flex items-center justify-center">
+        <div className="text-violet-400 animate-pulse font-mono tracking-widest text-sm">
+          INITIALIZING SCAM DETECTOR...
+        </div>
+      </div>
+    }>
+      <HomeContent />
+    </Suspense>
   );
 }
